@@ -19,7 +19,7 @@ class MyShakespeare:
         self.epochs = epochs
 
         # hyperparameter
-        self.n = 512
+        self.n = 128
         self.learning_rate = learning_rate
         self.alpha = alpha
         self.lambda_ = lambda_
@@ -95,7 +95,8 @@ class MyShakespeare:
         self.ps = np.zeros((self.T, self.dic_len, self.bs))
 
         # store state of last sentence
-        self.h_neg1 = self._zero_initialize(self.n, 1)
+        self.h_neg1_batch = self._zero_initialize(self.n, self.bs)
+        self.h_neg1_old = None
 
         # for adagrad
         self.params    = [self.wiz, self.whz, self.bz, self.wir, self.whr, self.br, self.win, self.whn, self.bn, self.wyh, self.by]
@@ -131,10 +132,10 @@ class MyShakespeare:
         bs = batch_sentences.shape[0]
         T = self.T
 
-        h_prev = np.tile(self.h_neg1, (1, bs))
-        self.hs_minus_1 = h_prev.copy()
-
+        h_prev = self.h_neg1_batch.copy()
+        self.h_neg1_old = self.h_neg1_batch.copy()
         loss = 0
+
         for t in range(T):
             char_indices = batch_sentences[:, t] # (bs,)
             
@@ -163,7 +164,7 @@ class MyShakespeare:
             
             h_prev = self.hs[t]
 
-        self.h_neg1 = np.mean(self.hs[T-1], axis=1, keepdims=True)
+        self.h_neg1_batch = self.hs[T-1].copy()
 
         return loss / bs
 
@@ -188,15 +189,15 @@ class MyShakespeare:
 
             dh = self.wyh.T @ dy + dh_next
 
-            h_prev = self.hs[t-1] if t > 0 else self.hs_minus_1
+            h_prev = self.hs[t-1] if t > 0 else self.h_neg1_old
 
             dz_raw = dh * (self.hs_tilde[t] - h_prev) * self.zs[t] * (1 - self.zs[t])
             dn_raw = dh * self.zs[t] * (1 - self.hs_tilde[t]**2)
             dr_raw = (self.whn.T @ dn_raw) * h_prev * self.rs[t] * (1 - self.rs[t])
 
-            np.add.at(self.dwiz.T, char_indices, dz_raw.T)
-            np.add.at(self.dwir.T, char_indices, dr_raw.T)
-            np.add.at(self.dwin.T, char_indices, dn_raw.T)
+            self.dwiz += dz_raw @ self.xs[t].T
+            self.dwir += dr_raw @ self.xs[t].T
+            self.dwin += dn_raw @ self.xs[t].T
 
             self.dwhz += dz_raw @ h_prev.T
             self.dwhr += dr_raw @ h_prev.T
@@ -209,9 +210,12 @@ class MyShakespeare:
 
             # ! pass loss to the cell before current cell
             dh_next = dh * (1 - self.zs[t]) + \
-                    (self.whz.T @ dz_raw) + \
-                    (self.whr.T @ dr_raw) + \
-                    (self.whn.T @ dn_raw) * self.rs[t]
+                        (self.whz.T @ dz_raw) + \
+                        (self.whr.T @ dr_raw) + \
+                        (self.whn.T @ dn_raw) * self.rs[t]
+            
+        for g in self.grads:
+            g /= bs
 
     def _update_parameters(self):
         # adam optimize
@@ -236,7 +240,7 @@ class MyShakespeare:
             log_info(f'epoch: {epoch} started')
             for idx, (sentence, target, is_epoch_end) in enumerate(self.loader.get_sentences_batch()):
                 if is_epoch_end:
-                    self.h_neg1 = self._zero_initialize(self.n, 1)
+                    self.h_neg1_batch = self._zero_initialize(self.n, self.bs)
                     break
                 
                 # 1. forward
@@ -253,10 +257,10 @@ class MyShakespeare:
 
                 # 5. print the average loss per 100 trains
                 if idx % 10 == 0:
-                    log_info(f'epoch {epoch} iteration {idx} average loss {loss/100:.4f}')
+                    log_info(f'epoch {epoch} iteration {idx} average loss {loss:.4f}')
 
                 # 6. sample
-                if idx % 50 == 0:
+                if idx % 10 == 0:
                     # as sentence is a 2d-array
                     seed = sentence[0, 0]
                     print(f'---- epoch {epoch} iteration {idx} test sample seed {self.loader.ix_to_char[seed]} ----')
@@ -265,7 +269,7 @@ class MyShakespeare:
                     print('-' * 50)
                 
                 # 7. sample with prompt
-                if idx % 250 == 0:
+                if idx % 20 == 0:
                     prompt_raw = np.random.choice(self.prompts)
                     prompt = [self.loader.char_to_ix[c] for c in prompt_raw]
                     print(f'---- epoch {epoch} iteration {idx} test sample prompt "{prompt_raw}" ----')
@@ -280,9 +284,10 @@ class MyShakespeare:
     def sample(self, seed_ix: int, cnt: int) -> str:
         # 65x1
         x = self._zero_initialize(self.dic_len, 1)
-
         x[seed_ix] = 1
-        h = self.h_neg1.copy()
+        
+        # clean initialization
+        h = self._zero_initialize(self.n, 1)
 
         indices = [seed_ix]
         for t in range(cnt):
@@ -313,9 +318,9 @@ class MyShakespeare:
         return sentence
     
     def sample_with_prompt(self, prompt: List[int], cnt: int) -> str:
-
         # get last state h
-        h = self.h_neg1.copy()
+        h = self._zero_initialize(self.n, 1)
+
         indices = prompt.copy()
 
         for i in range(len(prompt) - 1):

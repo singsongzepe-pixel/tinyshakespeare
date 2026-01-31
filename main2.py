@@ -17,8 +17,8 @@ class MyShakespeare:
         self.epochs = epochs
 
         # hyperparameter
-        self.n = 512
-        self.learning_rate = learning_rate
+        self.n = 128
+        self.learning_rate = 0.001
         self.alpha = alpha
         self.lambda_ = lambda_
 
@@ -129,7 +129,6 @@ class MyShakespeare:
         self.ps, self.hs, self.hs_tilde = {}, {}, {}
 
         self.hs[-1] = self.h_neg1.copy()
-        loss = 0
         for t in range(self.loader.sentence_len):
             # (65,1)
             self.xs[t] = self.one_hot(sentence[t])
@@ -148,12 +147,7 @@ class MyShakespeare:
             y = self.wyh @ self.hs[t] + self.by
             self.ps[t] = softmax(y)
 
-            # loss
-            loss += -np.log(self.ps[t][sentence[t], 0] + 1e-12)
-        
         self.h_neg1 = self.hs[self.loader.sentence_len - 1].copy()
-
-        return loss
 
     def _backward(self, target: List[int]):
         for g in self.grads:
@@ -221,9 +215,13 @@ class MyShakespeare:
                     break
                 
                 # 1. forward
-                loss = self._forward(sentence)
+                self._forward(sentence)
 
                 # 2. tot loss
+                # loss
+                loss = 0
+                for t in range(self.loader.sentence_len):
+                    loss += -np.log(self.ps[t][target[t], 0] + 1e-12)
                 tot_loss += loss
 
                 # 3. backward
@@ -234,7 +232,7 @@ class MyShakespeare:
 
                 # 5. print the average loss per 100 trains
                 if idx % 100 == 0:
-                    log_info(f'epoch {epoch} iteration {idx} average loss {loss/100:.4f}')
+                    log_info(f'epoch {epoch} iteration {idx} average loss per char {loss/100:.4f}')
 
                 # 6. sample
                 if idx % 1000 == 0:
@@ -262,7 +260,7 @@ class MyShakespeare:
         x = self._zero_initialize(self.dic_len, 1)
 
         x[seed_ix] = 1
-        h = self.h_neg1.copy()
+        h = self._zero_initialize(self.n, 1)
 
         indices = [seed_ix]
         for t in range(cnt):
@@ -295,7 +293,7 @@ class MyShakespeare:
     def sample_with_prompt(self, prompt: List[int], cnt: int) -> str:
 
         # get last state h
-        h = self.h_neg1.copy()
+        h = self._zero_initialize(self.n, 1)
         indices = prompt.copy()
 
         for i in range(len(prompt) - 1):
@@ -384,9 +382,9 @@ def main():
     
     tiny_shakespeare = MyShakespeare(loader)
 
-    if not tiny_shakespeare.load_model():
-        tiny_shakespeare.train()
-        tiny_shakespeare.save_model()
+    # if not tiny_shakespeare.load_model():
+    tiny_shakespeare.train()
+    tiny_shakespeare.save_model()
 
     # if well trained, test some samples
     for i in range(5):

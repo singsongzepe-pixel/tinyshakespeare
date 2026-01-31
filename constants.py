@@ -12,6 +12,7 @@ LOG = True
 file_path = './data/'
 
 TINY_SHAKESPEARE_FILENAME = 'tiny_shakespeare.txt'
+TOKENIZED_TINY_SHAKESPEARE_FILENAME = 'tokenized_tiny_shakespeare.txt'
 TINY_SHAKESPEARE_URL = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
 
 # model
@@ -41,3 +42,6 @@ prompts = [
 # for saving model
 MODEL_PARAMS_FILE_PATH = './model/'
 MODEL_PARAMS_FILENAME = 'params.npz'
+
+GRU_RNN_WITH_ADAM_CHAR_LEVEL_PARAMS_FILENAME = 'gru_rnn_with_adam_char_level_params_filename'
+GRU_RNN_WITH_ADAM_EMBEDDING_PARAMS_FILENAME = 'gru_rnn_with_adam_embedding_params_filename'
