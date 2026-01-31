@@ -13,6 +13,8 @@ class MyShakespeare:
         #
         self.loader = loader
         self.dic_len = self.loader.dic_len # 65 as value
+        self.T = self.loader.sentence_len
+        self.bs = self.loader.sentence_batch_size
         
         self.epochs = epochs
 
@@ -84,12 +86,13 @@ class MyShakespeare:
         self.iter_time = 0
 
         # store some state from forward, will be accessed in backward
-        self.xs = None
-        self.zs = None
-        self.rs = None
-        self.ps = None
-        self.hs = None
-        self.hs_tilde = None
+        # Time Dimension Batch size 
+        self.xs = np.zeros((self.T, self.dic_len, self.bs))
+        self.zs = np.zeros((self.T, self.n, self.bs))
+        self.rs = np.zeros((self.T, self.n, self.bs))
+        self.hs_tilde = np.zeros((self.T, self.n, self.bs))
+        self.hs = np.zeros((self.T, self.n, self.bs))
+        self.ps = np.zeros((self.T, self.dic_len, self.bs))
 
         # store state of last sentence
         self.h_neg1 = self._zero_initialize(self.n, 1)
@@ -124,75 +127,91 @@ class MyShakespeare:
 
         return oh
 
-    def _forward(self, sentence) -> float:
-        self.xs, self.zs, self.rs = {}, {}, {} 
-        self.ps, self.hs, self.hs_tilde = {}, {}, {}
+    def _forward(self, batch_sentences) -> float:
+        bs = batch_sentences.shape[0]
+        T = self.T
 
-        self.hs[-1] = self.h_neg1.copy()
+        h_prev = np.tile(self.h_neg1, (1, bs))
+        self.hs_minus_1 = h_prev.copy()
+
         loss = 0
-        for t in range(self.loader.sentence_len):
-            # (65,1)
-            self.xs[t] = self.one_hot(sentence[t])
+        for t in range(T):
+            char_indices = batch_sentences[:, t] # (bs,)
             
-            # update gate
-            self.zs[t] = sigmoid(self.wiz @ self.xs[t] + self.whz @ self.hs[t-1] + self.bz)
+            self.xs[t, char_indices, np.arange(bs)] = 1
 
-            # reset gate
-            self.rs[t] = sigmoid(self.wir @ self.xs[t] + self.whr @ self.hs[t-1] + self.br)
+            wiz_x = self.wiz[:, char_indices]
+            wir_x = self.wir[:, char_indices]
+            win_x = self.win[:, char_indices]
 
-            # candidate
-            self.hs_tilde[t] = np.tanh(self.win @ self.xs[t] + self.whn @ (self.rs[t] * self.hs[t-1]) + self.bn)
+            # (n, n) @ (n, bs) -> (n, bs)
+            self.zs[t] = sigmoid(wiz_x + self.whz @ h_prev + self.bz)
+            self.rs[t] = sigmoid(wir_x + self.whr @ h_prev + self.br)
+            
+            # Candidate hidden state
+            self.hs_tilde[t] = np.tanh(win_x + self.whn @ (self.rs[t] * h_prev) + self.bn)
 
-            # h
-            self.hs[t] = (1-self.zs[t]) * self.hs[t-1] + self.zs[t] * self.hs_tilde[t]
-            y = self.wyh @ self.hs[t] + self.by
+            # Hidden state update
+            self.hs[t] = (1 - self.zs[t]) * h_prev + self.zs[t] * self.hs_tilde[t]
+            
+            # Output & Softmax
+            y = self.wyh @ self.hs[t] + self.by # (dic_len, bs)
             self.ps[t] = softmax(y)
 
-            # loss
-            loss += -np.log(self.ps[t][sentence[t], 0] + 1e-12)
+            corect_char_probs = self.ps[t][char_indices, np.arange(bs)]
+            loss += -np.sum(np.log(corect_char_probs + 1e-12))
+            
+            h_prev = self.hs[t]
+
+        self.h_neg1 = np.mean(self.hs[T-1], axis=1, keepdims=True)
+
+        return loss / bs
+
+    def _backward(self, batch_targets):
+        bs = batch_targets.shape[0]
+        T = self.T
         
-        self.h_neg1 = self.hs[self.loader.sentence_len - 1].copy()
-
-        return loss
-
-    def _backward(self, target: List[int]):
         for g in self.grads:
             g.fill(0)
         
-        dh_next = self._zero_initialize(self.n, 1)
-        for t in reversed(range(self.loader.sentence_len)):
-            # 
+        dh_next = np.zeros((self.n, bs))
+        
+        for t in reversed(range(T)):
+            char_indices = batch_targets[:, t]
+            
+            # (dic_len, bs)
             dy = self.ps[t].copy()
-            dy[target[t]] -= 1
+            dy[char_indices, np.arange(bs)] -= 1
             
             self.dwyh += dy @ self.hs[t].T
-            self.dby += dy
+            self.dby += np.sum(dy, axis=1, keepdims=True)
 
             dh = self.wyh.T @ dy + dh_next
 
-            # update gate
-            dz_raw = dh * (self.hs_tilde[t] - self.hs[t-1]) * self.zs[t] * (1 - self.zs[t])
-            self.dwiz += dz_raw @ self.xs[t].T
-            self.dwhz += dz_raw @ self.hs[t-1].T
-            self.dbz  += dz_raw
+            h_prev = self.hs[t-1] if t > 0 else self.hs_minus_1
 
-            # reset gate
+            dz_raw = dh * (self.hs_tilde[t] - h_prev) * self.zs[t] * (1 - self.zs[t])
             dn_raw = dh * self.zs[t] * (1 - self.hs_tilde[t]**2)
-            dr_raw = (self.whn.T @ dn_raw) * self.hs[t-1] * self.rs[t] * (1 - self.rs[t])
-            self.dwir += dr_raw @ self.xs[t].T
-            self.dwhr += dr_raw @ self.hs[t-1].T
-            self.dbr  += dr_raw
+            dr_raw = (self.whn.T @ dn_raw) * h_prev * self.rs[t] * (1 - self.rs[t])
 
-            # new/candidate
-            self.dwin += dn_raw @ self.xs[t].T
-            self.dwhn += dn_raw @ (self.rs[t] * self.hs[t-1]).T
-            self.dbn  += dn_raw
+            np.add.at(self.dwiz.T, char_indices, dz_raw.T)
+            np.add.at(self.dwir.T, char_indices, dr_raw.T)
+            np.add.at(self.dwin.T, char_indices, dn_raw.T)
+
+            self.dwhz += dz_raw @ h_prev.T
+            self.dwhr += dr_raw @ h_prev.T
+            self.dwhn += dn_raw @ (self.rs[t] * h_prev).T
+
+            # bais
+            self.dbz += np.sum(dz_raw, axis=1, keepdims=True)
+            self.dbr += np.sum(dr_raw, axis=1, keepdims=True)
+            self.dbn += np.sum(dn_raw, axis=1, keepdims=True)
 
             # ! pass loss to the cell before current cell
             dh_next = dh * (1 - self.zs[t]) + \
-                      (self.whz.T @ dz_raw) + \
-                      (self.whr.T @ dr_raw) + \
-                      (self.whn.T @ dn_raw) * self.rs[t]
+                    (self.whz.T @ dz_raw) + \
+                    (self.whr.T @ dr_raw) + \
+                    (self.whn.T @ dn_raw) * self.rs[t]
 
     def _update_parameters(self):
         # adam optimize
@@ -215,7 +234,7 @@ class MyShakespeare:
         for epoch in range(1, epochs+1):
             tot_loss = 0
             log_info(f'epoch: {epoch} started')
-            for idx, (sentence, target, is_epoch_end) in enumerate(self.loader.get_sentences()):
+            for idx, (sentence, target, is_epoch_end) in enumerate(self.loader.get_sentences_batch()):
                 if is_epoch_end:
                     self.h_neg1 = self._zero_initialize(self.n, 1)
                     break
@@ -233,19 +252,20 @@ class MyShakespeare:
                 self._update_parameters()
 
                 # 5. print the average loss per 100 trains
-                if idx % 100 == 0:
+                if idx % 10 == 0:
                     log_info(f'epoch {epoch} iteration {idx} average loss {loss/100:.4f}')
 
                 # 6. sample
-                if idx % 1000 == 0:
-                    seed = sentence[0]
+                if idx % 50 == 0:
+                    # as sentence is a 2d-array
+                    seed = sentence[0, 0]
                     print(f'---- epoch {epoch} iteration {idx} test sample seed {self.loader.ix_to_char[seed]} ----')
                     sample_text = self.sample(seed, sample_len)
                     print(f'sample text: {sample_text}')
                     print('-' * 50)
                 
                 # 7. sample with prompt
-                if idx % 5000 == 0:
+                if idx % 250 == 0:
                     prompt_raw = np.random.choice(self.prompts)
                     prompt = [self.loader.char_to_ix[c] for c in prompt_raw]
                     print(f'---- epoch {epoch} iteration {idx} test sample prompt "{prompt_raw}" ----')
@@ -384,9 +404,9 @@ def main():
     
     tiny_shakespeare = MyShakespeare(loader)
 
-    if not tiny_shakespeare.load_model():
-        tiny_shakespeare.train()
-        tiny_shakespeare.save_model()
+    # if not tiny_shakespeare.load_model():
+    tiny_shakespeare.train()
+    tiny_shakespeare.save_model()
 
     # if well trained, test some samples
     for i in range(5):

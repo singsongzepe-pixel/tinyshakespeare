@@ -30,9 +30,9 @@ def log_erro(*mesages):
 
 # for model
 def softmax(z):
-    z_shifted = z - np.max(z, axis=0, keepdims=True)
-    tmp = np.exp(z_shifted)
+    tmp = np.exp(z - np.max(z, axis=0, keepdims=True))
     return tmp / np.sum(tmp, axis=0, keepdims=True)
+
 
 def sigmoid(z):
     return 1 / (1 + np.exp(-np.clip(z, -500, 500)))

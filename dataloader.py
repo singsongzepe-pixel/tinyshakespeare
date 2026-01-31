@@ -46,18 +46,25 @@ class DataLoader:
     # targets (bs, 100)
     # is_epoch_end
     def get_sentences_batch(self):
-        pointer = 0
-        while True:
-            if pointer + self.sentence_len * self.sentence_batch_size + 1 > self.text_len:
-                pointer = 0
-                yield None, None, True
-                continue
+            n_step = (self.text_len - 1) // (self.sentence_batch_size * self.sentence_len)
+            rounded_len = n_step * self.sentence_batch_size * self.sentence_len
             
-            # (bs, 100)
-            inputs = np.array(self.ixs[pointer : pointer + self.sentence_len*self.sentence_batch_size]).reshape(self.sentence_batch_size, self.sentence_len)
-            targets = np.array(self.ixs[pointer+1 : pointer + self.sentence_len*self.sentence_batch_size + 1]).reshape(self.sentence_batch_size, self.sentence_len)
+            data_x = self.ixs[:rounded_len].reshape(self.sentence_batch_size, -1)
+            data_y = self.ixs[1:rounded_len + 1].reshape(self.sentence_batch_size, -1)
 
-            yield inputs, targets, False
+            pointer = 0
+            max_pointer = data_x.shape[1]
 
-            pointer += self.sentence_len * self.sentence_batch_size
+            while True:
+                if pointer + self.sentence_len > max_pointer:
+                    pointer = 0
+                    yield None, None, True
+                    continue
+            
+                inputs = data_x[:, pointer : pointer + self.sentence_len]
+                targets = data_y[:, pointer : pointer + self.sentence_len]
+
+                yield inputs, targets, False
+
+                pointer += self.sentence_len
 
